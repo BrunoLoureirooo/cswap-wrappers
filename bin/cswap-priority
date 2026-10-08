@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""Priority account switcher for claude-swap.
+
+Decided afresh on every tick from the current usage alone. Best phase wins:
+  1. accounts with Fable headroom
+  2. else accounts with 5h/7d headroom (Opus and everything else)
+  3. else stay put
+Within the phase the active account is kept while it qualifies; otherwise the
+first in priority order is taken.
+
+Modes: one tick (default); --loop SECONDS; or --revive, the Claude Code
+StopFailure hook (ensure a usable account is active, then wake the session).
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+
+LOG = os.path.expanduser("~/Library/Logs/cswap-priority.log")
+LAST = os.path.expanduser("~/.cache/cswap-priority.last")
+TICK = os.path.expanduser("~/.cache/cswap-priority.tick")
+SWAP = os.path.expanduser("~/.cache/cswap-priority.swap")
+WOKE = os.path.expanduser("~/.cache/cswap-priority.woke")
+FABLE = "fable"
+CACHE_TTL = 30  # Claude Code keeps the keychain login cached for up to 30s per process
+
+
+def windows(acct):
+    """Return (five_hour, seven_day, fable) pct; None where not reported."""
+    u = acct.get("usage") or {}
+    five = (u.get("fiveHour") or {}).get("pct")
+    seven = (u.get("sevenDay") or {}).get("pct")
+    fable = next(
+        (s.get("pct") for s in u.get("scoped") or [] if str(s.get("name", "")).lower() == FABLE),
+        None,
+    )
+    return five, seven, fable
+
+
+def usable(acct):
+    return acct.get("usageStatus") == "ok" and not acct.get("disabled")
+
+
+def decide(accounts, threshold, order=None, threshold_5h=None, active=None):
+    """Return (target_number, phase) or (None, reason).
+
+    Takes the best phase any account is eligible for; within it, stays on the
+    active account if eligible, else the first in priority order.
+    """
+    thr5 = threshold if threshold_5h is None else threshold_5h
+    by_num = {a["number"]: a for a in accounts}
+    order = [n for n in (order or sorted(by_num)) if n in by_num]
+
+    def eligible(a, phase):
+        if not usable(a):
+            return False
+        five, seven, fable = windows(a)
+        if five is None or seven is None or five >= thr5 or seven >= threshold:
+            return False
+        return phase != "fable" or (fable is not None and fable < threshold)
+
+    for phase in ("fable", "opus"):
+        ok = [n for n in order if eligible(by_num[n], phase)]
+        if ok:
+            return (active if active in ok else ok[0]), phase
+    return None, "no account has headroom"
+
+
+def write(path, text, mode="w"):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, mode) as f:
+        f.write(text)
+
+
+def log(msg):
+    write(LOG, f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n", "a")
+
+
+def note_once(msg):
+    """Log msg only if it differs from the previous tick's summary."""
+    try:
+        prev = open(LAST).read()
+    except OSError:
+        prev = ""
+    if prev != msg:
+        log(msg)
+        write(LAST, msg)
+
+
+def mtime(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
+def last_swap():
+    try:
+        return json.load(open(SWAP))
+    except (OSError, ValueError):
+        return {"ts": 0}
+
+
+def tick(args, order):
+    """One evaluation. Returns (rc, ok); ok means the active account is the wanted one."""
+    write(TICK, time.strftime("%Y-%m-%d %H:%M:%S"))
+    r = subprocess.run(["cswap", "list", "--json"], capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        note_once(f"error: cswap list failed rc={r.returncode}: {r.stderr.strip()[:200]}")
+        return 1, False
+    data = json.loads(r.stdout)
+    active = data.get("activeAccountNumber")
+    if active not in {a["number"] for a in data["accounts"]}:
+        note_once("stay: the active login is not a managed cswap account (run `cswap add`)")
+        return 2, False
+    target, phase = decide(data["accounts"], args.threshold, order, args.threshold_5h, active)
+
+    if target is None:
+        note_once(f"stay on {active}: {phase}")
+        return 2, False
+    if target == active:
+        note_once(f"on {active} ({phase})")
+        return 2, True
+    msg = f"switch {active} -> {target} ({phase} headroom)"
+    if args.dry_run:
+        print("would " + msg)
+        return 0, False
+    s = subprocess.run(["cswap", "switch", str(target)], capture_output=True, text=True, timeout=120)
+    if s.returncode != 0:
+        note_once(f"error: {msg} failed rc={s.returncode}: {(s.stderr or s.stdout).strip()[:200]}")
+        return 1, False
+    write(SWAP, json.dumps({"ts": time.time(), "from": active, "to": target}))
+    log(msg)
+    note_once(f"on {target} ({phase})")
+    return 0, True
+
+
+def revive(args, order):
+    """StopFailure hook: get onto a usable account, then wake the session (exit 2)."""
+    t0 = time.time()
+    raw = sys.stdin.read()
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        payload = {}
+    session = str(payload.get("session_id", "unknown"))
+    log(f"revive {session[:8]}: failure payload {raw.strip()[:300]}")
+
+    woke = f"{WOKE}.{session}"
+    if t0 - mtime(woke) < args.cooldown:
+        log(f"revive {session[:8]}: woken {int(t0 - mtime(woke))}s ago, not waking again")
+        return 0
+
+    ok = False
+    while True:
+        _, ok = tick(args, order)
+        if ok or time.time() - t0 > args.budget:
+            break
+        time.sleep(10)
+    swap = last_swap()
+    if not ok:
+        log(f"revive {session[:8]}: no account has headroom, not waking")
+        return 0
+    if swap["ts"] < t0 - CACHE_TTL - 2:
+        log(f"revive {session[:8]}: no recent swap explains the failure, not waking")
+        return 0
+
+    time.sleep(max(0, min(swap["ts"], t0) + args.settle - time.time()))
+    write(woke, "")
+    log(f"revive {session[:8]}: waking session after swap {swap.get('from')} -> {swap.get('to')}")
+    print(
+        f"The Claude account hit its usage limit and was switched ({swap.get('from')} -> {swap.get('to')}); "
+        "the limit no longer blocks you. Resume the interrupted work: continue any subagents or workflow "
+        "agents that failed with a rate-limit or API error (SendMessage to each agent, or Workflow "
+        "resumeFromRunId for a workflow run), then carry on with the task.",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def main():
+    p = argparse.ArgumentParser()
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--loop", type=int, metavar="SECONDS", help="keep running, one tick every SECONDS")
+    mode.add_argument("--revive", action="store_true", help="run as a StopFailure hook")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--threshold", type=float, default=float(os.environ.get("CSWAP_PRIORITY_THRESHOLD", 95)),
+                   help="leave an account at this pct on the 7d and Fable windows")
+    p.add_argument("--threshold-5h", type=float, default=float(os.environ.get("CSWAP_PRIORITY_THRESHOLD_5H", 90)),
+                   help="leave an account at this pct on the 5h window")
+    p.add_argument("--order", default=os.environ.get("CSWAP_PRIORITY_ORDER", ""))
+    p.add_argument("--budget", type=int, default=120, help="--revive: seconds to look for a usable account")
+    p.add_argument("--settle", type=int, default=CACHE_TTL + 5,
+                   help="--revive: seconds after the swap (or the failure, if earlier) before waking")
+    p.add_argument("--cooldown", type=int, default=300, help="--revive: min seconds between wakes of one session")
+    args = p.parse_args()
+    order = [int(x) for x in args.order.split()] or None
+
+    if args.revive:
+        return revive(args, order)
+    if not args.loop:
+        return tick(args, order)[0]
+    while True:
+        try:
+            tick(args, order)
+        except Exception as e:
+            note_once(f"error: {type(e).__name__}: {e}")
+        time.sleep(args.loop)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

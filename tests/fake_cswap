@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+import json
+import os
+import sys
+
+fx = os.environ["FX"]
+if sys.argv[1] == "list":
+    scen = json.load(open(fx + "/scen.json"))
+    active = int(open(fx + "/active").read())
+    accounts = [
+        {
+            "number": int(n),
+            "usageStatus": "ok",
+            "usage": {
+                "fiveHour": {"pct": v[0]},
+                "sevenDay": {"pct": v[1]},
+                "scoped": [{"name": "Fable", "pct": v[2]}],
+            },
+        }
+        for n, v in sorted(scen.items(), key=lambda kv: int(kv[0]))
+    ]
+    print(json.dumps({"activeAccountNumber": active, "accounts": accounts}))
+elif sys.argv[1] == "switch":
+    open(fx + "/active", "w").write(sys.argv[2])
+    open(fx + "/calls", "a").write(sys.argv[2] + "\n")
