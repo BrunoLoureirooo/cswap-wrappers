@@ -70,6 +70,14 @@ class SingleTick(Harness):
         self.run_script(2, OK)
         self.assertEqual(self.calls(), [])
 
+    def test_does_not_move_onto_an_account_whose_reading_is_71_minutes_old(self):
+        self.run_script(2, {"1": [25, 53, 64, 4283], "2": [4, 75, 100, 60]})
+        self.assertEqual(self.calls(), [])
+
+    def test_moves_onto_the_same_account_once_its_reading_is_fresh(self):
+        self.run_script(2, {"1": [25, 53, 64, 60], "2": [4, 75, 100, 60]})
+        self.assertEqual(self.calls(), ["1"])
+
 
 class Revive(Harness):
     ARGS = ("--revive", "--settle", "2", "--budget", "5")

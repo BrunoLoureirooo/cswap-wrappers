@@ -15,11 +15,12 @@ def load():
     return mod
 
 
-def acct(n, five, seven, fable, status="ok", disabled=False):
+def acct(n, five, seven, fable, status="ok", disabled=False, age=0):
     scoped = [] if fable is None else [{"name": "Fable", "pct": fable}]
     a = {
         "number": n,
         "usageStatus": status,
+        "usageAgeSeconds": age,
         "usage": {"fiveHour": {"pct": five}, "sevenDay": {"pct": seven}, "scoped": scoped},
     }
     if disabled:
@@ -32,6 +33,20 @@ NONE = (None, "no account has headroom")
 # (name, accounts, decide() kwargs, expected)
 CASES = [
     ("both fresh -> 1 fable", [acct(1, 5, 5, 0), acct(2, 5, 5, 0)], {}, (1, "fable")),
+    (
+        "stale reading is skipped",
+        [acct(1, 25, 53, 64, age=4283), acct(2, 4, 75, 0)],
+        {"max_age": 900, "active": 2},
+        (2, "fable"),
+    ),
+    (
+        "stale reading ignored while the active account carries on in opus",
+        [acct(1, 25, 53, 64, age=4283), acct(2, 4, 75, 100)],
+        {"max_age": 900, "active": 2},
+        (2, "opus"),
+    ),
+    ("reading at the age limit still counts", [acct(1, 5, 5, 0, age=900), acct(2, 5, 5, 0)], {"max_age": 900}, (1, "fable")),
+    ("missing age is stale when a limit is set", [{**acct(1, 5, 5, 0), "usageAgeSeconds": None}, acct(2, 5, 5, 0)], {"max_age": 900}, (2, "fable")),
     ("1 fable spent -> 2 fable", [acct(1, 20, 60, 100), acct(2, 5, 5, 0)], {}, (2, "fable")),
     ("both fable spent -> 1 opus", [acct(1, 20, 60, 100), acct(2, 5, 5, 100)], {}, (1, "opus")),
     ("1 opus dry on 7d -> 2 opus", [acct(1, 20, 96, 100), acct(2, 5, 5, 100)], {}, (2, "opus")),

@@ -11,6 +11,7 @@ if sys.argv[1] == "list":
         {
             "number": int(n),
             "usageStatus": "ok",
+            "usageAgeSeconds": v[3] if len(v) > 3 else 0,
             "usage": {
                 "fiveHour": {"pct": v[0]},
                 "sevenDay": {"pct": v[1]},

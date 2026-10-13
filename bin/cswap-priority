@@ -39,11 +39,15 @@ def windows(acct):
     return five, seven, fable
 
 
-def usable(acct):
-    return acct.get("usageStatus") == "ok" and not acct.get("disabled")
+def usable(acct, max_age=None):
+    if acct.get("usageStatus") != "ok" or acct.get("disabled"):
+        return False
+    # cswap keeps reporting "ok" for its last reading while usage polling is rate-limited
+    age = acct.get("usageAgeSeconds")
+    return max_age is None or (age is not None and age <= max_age)
 
 
-def decide(accounts, threshold, order=None, threshold_5h=None, active=None):
+def decide(accounts, threshold, order=None, threshold_5h=None, active=None, max_age=None):
     """Return (target_number, phase) or (None, reason).
 
     Takes the best phase any account is eligible for; within it, stays on the
@@ -54,7 +58,7 @@ def decide(accounts, threshold, order=None, threshold_5h=None, active=None):
     order = [n for n in (order or sorted(by_num)) if n in by_num]
 
     def eligible(a, phase):
-        if not usable(a):
+        if not usable(a, max_age):
             return False
         five, seven, fable = windows(a)
         if five is None or seven is None or five >= thr5 or seven >= threshold:
@@ -115,10 +119,11 @@ def tick(args, order):
     if active not in {a["number"] for a in data["accounts"]}:
         note_once("stay: the active login is not a managed cswap account (run `cswap add`)")
         return 2, False
-    target, phase = decide(data["accounts"], args.threshold, order, args.threshold_5h, active)
+    target, phase = decide(data["accounts"], args.threshold, order, args.threshold_5h, active, args.max_age)
 
     if target is None:
-        note_once(f"stay on {active}: {phase}")
+        stale = [a["number"] for a in data["accounts"] if a.get("usageStatus") == "ok" and not usable(a, args.max_age)]
+        note_once(f"stay on {active}: {phase}" + (f" (stale readings: {stale})" if stale else ""))
         return 2, False
     if target == active:
         note_once(f"on {active} ({phase})")
@@ -190,6 +195,7 @@ def main():
                    help="leave an account at this pct on the 7d and Fable windows")
     p.add_argument("--threshold-5h", type=float, default=float(os.environ.get("CSWAP_PRIORITY_THRESHOLD_5H", 90)),
                    help="leave an account at this pct on the 5h window")
+    p.add_argument("--max-age", type=int, default=900, help="ignore usage readings older than this many seconds")
     p.add_argument("--order", default=os.environ.get("CSWAP_PRIORITY_ORDER", ""))
     p.add_argument("--budget", type=int, default=120, help="--revive: seconds to look for a usable account")
     p.add_argument("--settle", type=int, default=CACHE_TTL + 5,
