@@ -1,8 +1,0 @@
-embedder: mock
-distill:
-  commands:
-    enabled: false
-hooks:
-  read_skeleton: false
-  search_digest: false
-  read_reread: false
