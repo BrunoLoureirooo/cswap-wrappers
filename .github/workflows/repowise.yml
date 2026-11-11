@@ -1,0 +1,22 @@
+# Repowise gates: judge what a change adds (new secrets or risky calls, docs that name files or
+# commands that don't exist) on every pull request and on every push to main.
+# The index itself (.repowise/) is local to each checkout and is kept current by the
+# post-commit / post-merge hooks `repowise init` and claude-goat install - CI does not build it.
+# Pin a release tag, not main. Needs no API key.
+name: repowise
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+permissions:
+  contents: read
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # gates need merge-base history; a shallow clone exits 2
+      - uses: repowise-dev/repowise@v0.60.1
+        with:
+          checks: doc-drift,security   # add health, risk (policy choices) or coverage (needs a report) here

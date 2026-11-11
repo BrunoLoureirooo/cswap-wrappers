@@ -1,1 +1,12 @@
 __pycache__/
+# repowise (local index + generated editor files; config stays tracked)
+.repowise/*
+!.repowise/config.yaml
+!.repowise/decisions.yaml
+!.repowise/health-rules.json
+!.repowise/policies.yaml
+!.repowise/teams.yaml
+.claude/CLAUDE.md
+.vscode/mcp.json
+.vscode/extensions.json
+.github/copilot-instructions.md
